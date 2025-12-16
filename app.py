@@ -380,13 +380,15 @@ class URLDownloadDialog(QDialog):
 class PipelineOptionsDialog(QDialog):
     """Dialog for configuring pipeline options."""
 
-    def __init__(self, pipeline_name, options_config, current_values=None, parent=None):
+    def __init__(self, pipeline_name, options_config, current_values=None, parent=None, pipeline_key=None):
         super().__init__(parent)
         self.setWindowTitle(f"Configure {pipeline_name}")
         self.setMinimumWidth(350)
         self.options_config = options_config
+        self.pipeline_key = pipeline_key
         self.widgets = {}
         self.result_values = current_values.copy() if current_values else {}
+        self.presets = self._load_presets()
 
         self.setup_ui()
 
@@ -425,6 +427,9 @@ class PipelineOptionsDialog(QDialog):
                     if value == current:
                         current_index = i
                 widget.setCurrentIndex(current_index)
+                # Connect preset changes to update other widgets
+                if key == 'preset':
+                    widget.currentIndexChanged.connect(self._on_preset_changed)
             else:
                 widget = QLineEdit()
                 widget.setText(str(current))
@@ -497,6 +502,42 @@ class PipelineOptionsDialog(QDialog):
 
     def get_values(self):
         return self.result_values
+
+    def _load_presets(self):
+        """Load presets from the pipeline module if available."""
+        if not self.pipeline_key:
+            return {}
+        try:
+            import importlib
+            module = importlib.import_module(f'pipelines.{self.pipeline_key}')
+            return getattr(module, 'PRESETS', {})
+        except Exception:
+            return {}
+
+    def _on_preset_changed(self, index):
+        """Update other widgets when preset selection changes."""
+        if 'preset' not in self.widgets:
+            return
+
+        preset_widget = self.widgets['preset']
+        preset_value = preset_widget.currentData()
+
+        # Don't update if custom is selected
+        if preset_value == 'custom' or preset_value not in self.presets:
+            return
+
+        preset_config = self.presets[preset_value]
+
+        # Update other widgets with preset values
+        for key, value in preset_config.items():
+            if key in self.widgets:
+                widget = self.widgets[key]
+                if isinstance(widget, QDoubleSpinBox):
+                    widget.setValue(float(value))
+                elif isinstance(widget, QSpinBox):
+                    widget.setValue(int(value))
+                elif isinstance(widget, QCheckBox):
+                    widget.setChecked(bool(value))
 
 
 class InstallThread(QThread):
@@ -1205,7 +1246,8 @@ class VideoProcessorApp(QMainWindow):
             pipeline['name'],
             pipeline['options'],
             current_values,
-            self
+            self,
+            pipeline_key=pipeline_key
         )
 
         if dialog.exec() == QDialog.DialogCode.Accepted:

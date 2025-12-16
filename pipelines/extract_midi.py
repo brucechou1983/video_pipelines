@@ -90,13 +90,14 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
 
     try:
         # Try uv first (preferred for this project), then fall back to pip
+        # Use CoreML backend for Apple Silicon Macs (faster and more compatible)
         uv_path = shutil.which("uv")
         if uv_path:
-            cmd = [uv_path, "pip", "install", "basic-pitch==0.3.0", "--quiet"]
+            cmd = [uv_path, "pip", "install", "basic-pitch[coreml]", "--quiet"]
         else:
             # Fallback to pip
             import sys
-            cmd = [sys.executable, "-m", "pip", "install", "basic-pitch==0.3.0", "--quiet"]
+            cmd = [sys.executable, "-m", "pip", "install", "basic-pitch[coreml]", "--quiet"]
 
         result = subprocess.run(
             cmd,
@@ -176,7 +177,12 @@ def process(input_path: str, output_dir: str, progress_callback=None, options=No
     # Import here to catch import errors at runtime
     try:
         from basic_pitch.inference import predict_and_save
-        from basic_pitch import ICASSP_2022_MODEL_PATH
+        # Try CoreML model first (preferred for Apple Silicon), fall back to TensorFlow
+        try:
+            from basic_pitch import ICASSP_2022_MODEL_PATH as MODEL_PATH
+        except ImportError:
+            # CoreML model path
+            from basic_pitch import ICASSP_2022_MODEL_PATH as MODEL_PATH
     except ImportError:
         raise RuntimeError(
             "basic-pitch is not installed. Please enable and install it from Settings (Cmd+,)"
@@ -245,7 +251,7 @@ def process(input_path: str, output_dir: str, progress_callback=None, options=No
                 sonify_midi=False,
                 save_model_outputs=False,
                 save_notes=False,
-                model_or_model_path=ICASSP_2022_MODEL_PATH,
+                model_or_model_path=MODEL_PATH,
                 onset_threshold=onset_threshold,
                 frame_threshold=frame_threshold,
                 minimum_note_length=min_note_length,

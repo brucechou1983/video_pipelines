@@ -75,10 +75,10 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
         progress_callback(10, "Installing basic-pitch (this may take a few minutes)...")
 
     try:
-        # Install basic-pitch with pip
+        # Install basic-pitch with pip (pinned version for reproducibility)
         cmd = [
             sys.executable, "-m", "pip", "install",
-            "basic-pitch",
+            "basic-pitch==0.3.0",
             "--quiet"
         ]
 

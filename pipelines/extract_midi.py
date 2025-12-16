@@ -92,13 +92,15 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
         # Try uv first (preferred for this project), then fall back to pip
         # Use CoreML backend for Apple Silicon Macs (faster and more compatible)
         # Also install setuptools for pkg_resources dependency
+        # Pin scipy<1.14 for compatibility (gaussian moved to scipy.signal.windows in 1.14)
         uv_path = shutil.which("uv")
+        packages = ["setuptools", "scipy<1.14", "basic-pitch[coreml]"]
         if uv_path:
-            cmd = [uv_path, "pip", "install", "setuptools", "basic-pitch[coreml]", "--quiet"]
+            cmd = [uv_path, "pip", "install", "--quiet"] + packages
         else:
             # Fallback to pip
             import sys
-            cmd = [sys.executable, "-m", "pip", "install", "setuptools", "basic-pitch[coreml]", "--quiet"]
+            cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + packages
 
         result = subprocess.run(
             cmd,

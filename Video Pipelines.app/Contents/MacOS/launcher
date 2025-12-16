@@ -2,4 +2,4 @@
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$DIR"
-exec /opt/homebrew/bin/uv run python app.py
+exec uv run python app.py

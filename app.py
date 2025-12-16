@@ -593,4 +593,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Required for multiprocessing to work in frozen/bundled apps on macOS
+    multiprocessing.freeze_support()
     main()

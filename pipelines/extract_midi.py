@@ -69,18 +69,20 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
     Returns:
         Tuple of (success, message)
     """
-    import sys
+    import shutil
 
     if progress_callback:
         progress_callback(10, "Installing basic-pitch (this may take a few minutes)...")
 
     try:
-        # Install basic-pitch with pip (pinned version for reproducibility)
-        cmd = [
-            sys.executable, "-m", "pip", "install",
-            "basic-pitch==0.3.0",
-            "--quiet"
-        ]
+        # Try uv first (preferred for this project), then fall back to pip
+        uv_path = shutil.which("uv")
+        if uv_path:
+            cmd = [uv_path, "pip", "install", "basic-pitch==0.3.0", "--quiet"]
+        else:
+            # Fallback to pip
+            import sys
+            cmd = [sys.executable, "-m", "pip", "install", "basic-pitch==0.3.0", "--quiet"]
 
         result = subprocess.run(
             cmd,

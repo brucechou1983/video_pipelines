@@ -17,6 +17,26 @@ requires_install = True
 # Pipeline options
 options = [
     {
+        'key': 'preset',
+        'label': 'Preset',
+        'type': 'choice',
+        'default': 'clean',
+        'choices': [
+            ('default', 'Default - Balanced detection'),
+            ('clean', 'Clean - Fewer false notes'),
+            ('sensitive', 'Sensitive - Capture all notes'),
+            ('custom', 'Custom - Manual tuning'),
+        ],
+        'description': 'Quick preset for common use cases'
+    },
+    {
+        'key': 'melodia_trick',
+        'label': 'Melodia Cleanup',
+        'type': 'bool',
+        'default': True,
+        'description': 'Apply melodia post-processing to reduce spurious notes'
+    },
+    {
         'key': 'onset_threshold',
         'label': 'Onset Threshold',
         'type': 'float',
@@ -46,6 +66,28 @@ options = [
         'description': 'Minimum note duration in milliseconds'
     },
 ]
+
+# Presets for easy configuration
+PRESETS = {
+    'default': {
+        'onset_threshold': 0.5,
+        'frame_threshold': 0.3,
+        'min_note_length': 58,
+        'melodia_trick': True,
+    },
+    'clean': {
+        'onset_threshold': 0.6,
+        'frame_threshold': 0.5,
+        'min_note_length': 127,
+        'melodia_trick': True,
+    },
+    'sensitive': {
+        'onset_threshold': 0.3,
+        'frame_threshold': 0.2,
+        'min_note_length': 30,
+        'melodia_trick': False,
+    },
+}
 
 
 def check_installation() -> tuple[bool, str]:
@@ -200,9 +242,21 @@ def process(input_path: str, output_dir: str, progress_callback=None, options=No
 
     # Get options with defaults
     opts = options or {}
-    onset_threshold = opts.get('onset_threshold', 0.5)
-    frame_threshold = opts.get('frame_threshold', 0.3)
-    min_note_length = opts.get('min_note_length', 58)
+
+    # Apply preset if selected (unless custom)
+    preset = opts.get('preset', 'clean')
+    if preset != 'custom' and preset in PRESETS:
+        preset_values = PRESETS[preset]
+        onset_threshold = preset_values['onset_threshold']
+        frame_threshold = preset_values['frame_threshold']
+        min_note_length = preset_values['min_note_length']
+        melodia_trick = preset_values['melodia_trick']
+    else:
+        # Custom mode - use individual settings
+        onset_threshold = opts.get('onset_threshold', 0.5)
+        frame_threshold = opts.get('frame_threshold', 0.3)
+        min_note_length = opts.get('min_note_length', 58)
+        melodia_trick = opts.get('melodia_trick', True)
 
     if progress_callback:
         progress_callback(0, f"Starting MIDI extraction: {input_path.name}")
@@ -259,6 +313,7 @@ def process(input_path: str, output_dir: str, progress_callback=None, options=No
                 onset_threshold=onset_threshold,
                 frame_threshold=frame_threshold,
                 minimum_note_length=min_note_length,
+                melodia_trick=melodia_trick,
             )
         except Exception as e:
             raise RuntimeError(f"MIDI extraction failed: {str(e)}")

@@ -413,6 +413,18 @@ class PipelineOptionsDialog(QDialog):
                 widget = QSpinBox()
                 widget.setRange(opt.get('min', 0), opt.get('max', 10000))
                 widget.setValue(int(current))
+            elif opt_type == 'bool':
+                widget = QCheckBox()
+                widget.setChecked(bool(current))
+            elif opt_type == 'choice':
+                widget = QComboBox()
+                choices = opt.get('choices', [])
+                current_index = 0
+                for i, (value, display) in enumerate(choices):
+                    widget.addItem(display, value)
+                    if value == current:
+                        current_index = i
+                widget.setCurrentIndex(current_index)
             else:
                 widget = QLineEdit()
                 widget.setText(str(current))
@@ -454,6 +466,14 @@ class PipelineOptionsDialog(QDialog):
                 widget.setValue(float(default))
             elif isinstance(widget, QSpinBox):
                 widget.setValue(int(default))
+            elif isinstance(widget, QCheckBox):
+                widget.setChecked(bool(default))
+            elif isinstance(widget, QComboBox):
+                # Find index of default value
+                for i in range(widget.count()):
+                    if widget.itemData(i) == default:
+                        widget.setCurrentIndex(i)
+                        break
             else:
                 widget.setText(str(default))
 
@@ -466,6 +486,10 @@ class PipelineOptionsDialog(QDialog):
                 self.result_values[key] = widget.value()
             elif isinstance(widget, QSpinBox):
                 self.result_values[key] = widget.value()
+            elif isinstance(widget, QCheckBox):
+                self.result_values[key] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                self.result_values[key] = widget.currentData()
             else:
                 self.result_values[key] = widget.text()
 

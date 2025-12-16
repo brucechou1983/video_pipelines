@@ -7,7 +7,6 @@ Drag and drop videos to process with selected pipeline.
 import sys
 import os
 import multiprocessing
-import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from PyQt6.QtWidgets import (

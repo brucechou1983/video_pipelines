@@ -91,13 +91,14 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
     try:
         # Try uv first (preferred for this project), then fall back to pip
         # Use CoreML backend for Apple Silicon Macs (faster and more compatible)
+        # Also install setuptools for pkg_resources dependency
         uv_path = shutil.which("uv")
         if uv_path:
-            cmd = [uv_path, "pip", "install", "basic-pitch[coreml]", "--quiet"]
+            cmd = [uv_path, "pip", "install", "setuptools", "basic-pitch[coreml]", "--quiet"]
         else:
             # Fallback to pip
             import sys
-            cmd = [sys.executable, "-m", "pip", "install", "basic-pitch[coreml]", "--quiet"]
+            cmd = [sys.executable, "-m", "pip", "install", "setuptools", "basic-pitch[coreml]", "--quiet"]
 
         result = subprocess.run(
             cmd,

@@ -1,0 +1,11 @@
+[project]
+name = "video-processor"
+version = "0.1.0"
+description = "macOS desktop app for video processing with drag-and-drop support"
+requires-python = ">=3.11"
+dependencies = [
+    "pyqt6>=6.4.0",
+]
+
+[project.scripts]
+video-processor = "app:main"

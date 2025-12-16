@@ -1,0 +1,499 @@
+#!/usr/bin/env python3
+"""
+Video Processor - macOS Desktop App
+Drag and drop videos to process with selected pipeline.
+"""
+
+import sys
+import os
+from pathlib import Path
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
+    QProgressBar, QFileDialog, QMessageBox, QFrame, QTextEdit,
+    QDialog, QGroupBox
+)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon
+
+from pipelines import get_available_pipelines
+
+PIPELINE_HELP = """
+To create a new pipeline, add a Python file in the 'pipelines' folder.
+
+Example: pipelines/my_pipeline.py
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+name = "My Pipeline"
+description = "What this pipeline does"
+
+def process(input_path, output_dir, progress_callback=None):
+    \"\"\"
+    Process a video file.
+
+    Args:
+        input_path: Path to input video file
+        output_dir: Directory to save output file
+        progress_callback: Optional callback(percent, message)
+
+    Returns:
+        Path to the output file
+    \"\"\"
+    from pathlib import Path
+    import subprocess
+
+    input_path = Path(input_path)
+    output_path = Path(output_dir) / f"{input_path.stem}_output.mp4"
+
+    # Report progress
+    if progress_callback:
+        progress_callback(0, "Starting...")
+
+    # Your ffmpeg or processing command here
+    cmd = ["ffmpeg", "-i", str(input_path), str(output_path)]
+    subprocess.run(cmd)
+
+    if progress_callback:
+        progress_callback(100, "Done!")
+
+    return str(output_path)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After adding the file, restart the app to see your new pipeline.
+"""
+
+
+class PipelineHelpDialog(QDialog):
+    """Dialog showing how to create a new pipeline."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Create New Pipeline")
+        self.setMinimumSize(500, 450)
+
+        layout = QVBoxLayout(self)
+
+        # Help text
+        help_text = QTextEdit()
+        help_text.setReadOnly(True)
+        help_text.setPlainText(PIPELINE_HELP.strip())
+        help_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #ddd;
+                font-family: monospace;
+                font-size: 12px;
+                border: 1px solid #444;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(help_text)
+
+        # Open folder button
+        btn_layout = QHBoxLayout()
+        open_folder_btn = QPushButton("Open Pipelines Folder")
+        open_folder_btn.clicked.connect(self.open_pipelines_folder)
+        btn_layout.addWidget(open_folder_btn)
+
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+
+        layout.addLayout(btn_layout)
+
+    def open_pipelines_folder(self):
+        import subprocess
+        pipelines_dir = Path(__file__).parent / "pipelines"
+        subprocess.run(["open", str(pipelines_dir)])
+
+
+class ProcessingThread(QThread):
+    """Background thread for video processing."""
+    progress = pyqtSignal(int, str)
+    finished_file = pyqtSignal(str, str, str)  # input_path, output_path, pipeline_name
+    error = pyqtSignal(str, str, str)  # input_path, error_message, pipeline_name
+    all_done = pyqtSignal()
+
+    def __init__(self, files, pipelines):
+        """
+        Args:
+            files: List of file paths to process
+            pipelines: List of (key, name, process_func) tuples
+        """
+        super().__init__()
+        self.files = files
+        self.pipelines = pipelines
+        self._stop_requested = False
+
+    def run(self):
+        total_tasks = len(self.files) * len(self.pipelines)
+        completed = 0
+
+        for file_path in self.files:
+            if self._stop_requested:
+                break
+            for key, name, process_func in self.pipelines:
+                if self._stop_requested:
+                    break
+                try:
+                    # Output to same directory as source file
+                    output_dir = str(Path(file_path).parent)
+
+                    def progress_callback(p, m):
+                        # Calculate overall progress
+                        overall = int((completed / total_tasks) * 100 + (p / total_tasks))
+                        self.progress.emit(overall, f"[{name}] {m}")
+
+                    output = process_func(
+                        file_path,
+                        output_dir,
+                        progress_callback=progress_callback
+                    )
+                    self.finished_file.emit(file_path, output, name)
+                except Exception as e:
+                    self.error.emit(file_path, str(e), name)
+                completed += 1
+        self.all_done.emit()
+
+    def stop(self):
+        self._stop_requested = True
+
+
+class DropZone(QFrame):
+    """Drag and drop zone for video files."""
+    files_dropped = pyqtSignal(list)
+
+    VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(150)
+        self.setStyleSheet("""
+            DropZone {
+                border: 2px dashed #666;
+                border-radius: 10px;
+                background-color: #2d2d2d;
+            }
+            DropZone:hover {
+                border-color: #888;
+                background-color: #353535;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        label = QLabel("Drop Video Files Here")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("color: #888; font-size: 18px;")
+        layout.addWidget(label)
+
+        sublabel = QLabel("or click Browse to select files")
+        sublabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sublabel.setStyleSheet("color: #666; font-size: 12px;")
+        layout.addWidget(sublabel)
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.setStyleSheet("""
+                DropZone {
+                    border: 2px dashed #4a9eff;
+                    border-radius: 10px;
+                    background-color: #3d3d5c;
+                }
+            """)
+
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet("""
+            DropZone {
+                border: 2px dashed #666;
+                border-radius: 10px;
+                background-color: #2d2d2d;
+            }
+        """)
+
+    def dropEvent(self, event: QDropEvent):
+        self.setStyleSheet("""
+            DropZone {
+                border: 2px dashed #666;
+                border-radius: 10px;
+                background-color: #2d2d2d;
+            }
+        """)
+
+        files = []
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if Path(path).suffix.lower() in self.VIDEO_EXTENSIONS:
+                files.append(path)
+
+        if files:
+            self.files_dropped.emit(files)
+            event.acceptProposedAction()
+
+
+class VideoProcessorApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Video Pipelines")
+        self.setMinimumSize(600, 500)
+        self.processing_thread = None
+
+        # Load pipelines
+        self.pipelines = get_available_pipelines()
+
+        self.setup_ui()
+        self.apply_dark_theme()
+
+    def setup_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        # Pipeline selection with checkboxes
+        pipeline_header = QHBoxLayout()
+        pipeline_header.addWidget(QLabel("Pipelines:"))
+        pipeline_header.addStretch()
+        help_btn = QPushButton("Read Me")
+        help_btn.clicked.connect(self.show_pipeline_help)
+        pipeline_header.addWidget(help_btn)
+        layout.addLayout(pipeline_header)
+
+        # Pipeline checkboxes
+        self.pipeline_checkboxes = {}
+        for key, pipeline in self.pipelines.items():
+            cb = QCheckBox(f"{pipeline['name']} - {pipeline['description']}")
+            cb.setChecked(True)  # Default to checked
+            cb.setProperty("pipeline_key", key)
+            self.pipeline_checkboxes[key] = cb
+            layout.addWidget(cb)
+
+        # Drop zone
+        self.drop_zone = DropZone()
+        self.drop_zone.files_dropped.connect(self.add_files)
+        layout.addWidget(self.drop_zone)
+
+        # Browse button
+        browse_btn = QPushButton("Browse Files...")
+        browse_btn.clicked.connect(self.browse_files)
+        layout.addWidget(browse_btn)
+
+        # File list
+        layout.addWidget(QLabel("Files to process:"))
+        self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(100)
+        layout.addWidget(self.file_list)
+
+        # Clear and remove buttons
+        list_btns = QHBoxLayout()
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self.remove_selected)
+        list_btns.addWidget(remove_btn)
+        clear_btn = QPushButton("Clear All")
+        clear_btn.clicked.connect(self.clear_files)
+        list_btns.addWidget(clear_btn)
+        list_btns.addStretch()
+        layout.addLayout(list_btns)
+
+        # Progress
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.status_label)
+
+        # Log area
+        self.log_area = QTextEdit()
+        self.log_area.setReadOnly(True)
+        self.log_area.setMaximumHeight(80)
+        self.log_area.setStyleSheet("background-color: #1e1e1e; color: #aaa; font-family: monospace;")
+        layout.addWidget(self.log_area)
+
+        # Process button
+        btn_layout = QHBoxLayout()
+        self.process_btn = QPushButton("Start Processing")
+        self.process_btn.setMinimumHeight(40)
+        self.process_btn.clicked.connect(self.toggle_processing)
+        self.process_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a9eff;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #3a8eef;
+            }
+            QPushButton:disabled {
+                background-color: #555;
+            }
+        """)
+        btn_layout.addWidget(self.process_btn)
+        layout.addLayout(btn_layout)
+
+    def apply_dark_theme(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget {
+                background-color: #1e1e1e;
+                color: #ddd;
+            }
+            QLabel {
+                color: #ddd;
+            }
+            QCheckBox {
+                color: #ddd;
+                padding: 3px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QListWidget, QPushButton {
+                background-color: #2d2d2d;
+                color: #ddd;
+                border: 1px solid #444;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QPushButton:hover {
+                background-color: #3d3d3d;
+            }
+            QListWidget::item:selected {
+                background-color: #4a9eff;
+            }
+            QProgressBar {
+                border: 1px solid #444;
+                border-radius: 4px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #4a9eff;
+            }
+        """)
+
+    def show_pipeline_help(self):
+        dialog = PipelineHelpDialog(self)
+        dialog.exec()
+
+    def add_files(self, files):
+        for f in files:
+            if not self.file_exists_in_list(f):
+                item = QListWidgetItem(Path(f).name)
+                item.setData(Qt.ItemDataRole.UserRole, f)
+                item.setToolTip(f)
+                self.file_list.addItem(item)
+        self.log(f"Added {len(files)} file(s)")
+
+    def file_exists_in_list(self, path):
+        for i in range(self.file_list.count()):
+            if self.file_list.item(i).data(Qt.ItemDataRole.UserRole) == path:
+                return True
+        return False
+
+    def browse_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Videos", "",
+            "Video Files (*.mp4 *.mov *.avi *.mkv *.wmv *.flv *.webm *.m4v *.mpeg *.mpg)"
+        )
+        if files:
+            self.add_files(files)
+
+    def remove_selected(self):
+        for item in self.file_list.selectedItems():
+            self.file_list.takeItem(self.file_list.row(item))
+
+    def clear_files(self):
+        self.file_list.clear()
+
+    def log(self, message):
+        self.log_area.append(message)
+        self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
+
+    def toggle_processing(self):
+        if self.processing_thread and self.processing_thread.isRunning():
+            self.processing_thread.stop()
+            self.process_btn.setText("Stopping...")
+            self.process_btn.setEnabled(False)
+        else:
+            self.start_processing()
+
+    def get_selected_pipelines(self):
+        """Get list of selected pipelines as (key, name, process_func) tuples."""
+        selected = []
+        for key, cb in self.pipeline_checkboxes.items():
+            if cb.isChecked():
+                pipeline = self.pipelines[key]
+                selected.append((key, pipeline['name'], pipeline['process']))
+        return selected
+
+    def start_processing(self):
+        if self.file_list.count() == 0:
+            QMessageBox.warning(self, "No Files", "Please add video files to process.")
+            return
+
+        selected_pipelines = self.get_selected_pipelines()
+        if not selected_pipelines:
+            QMessageBox.warning(self, "No Pipeline", "Please select at least one pipeline.")
+            return
+
+        files = []
+        for i in range(self.file_list.count()):
+            files.append(self.file_list.item(i).data(Qt.ItemDataRole.UserRole))
+
+        pipeline_names = ", ".join(p[1] for p in selected_pipelines)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.process_btn.setText("Stop Processing")
+        self.log(f"Starting processing with: {pipeline_names}")
+
+        self.processing_thread = ProcessingThread(files, selected_pipelines)
+        self.processing_thread.progress.connect(self.on_progress)
+        self.processing_thread.finished_file.connect(self.on_file_finished)
+        self.processing_thread.error.connect(self.on_file_error)
+        self.processing_thread.all_done.connect(self.on_all_done)
+        self.processing_thread.start()
+
+    def on_progress(self, percent, message):
+        self.progress_bar.setValue(percent)
+        self.status_label.setText(message)
+
+    def on_file_finished(self, input_path, output_path, pipeline_name):
+        self.log(f"[{pipeline_name}] {Path(input_path).name} -> {Path(output_path).name}")
+
+    def on_file_error(self, input_path, error, pipeline_name):
+        self.log(f"[{pipeline_name}] Error: {Path(input_path).name}: {error}")
+
+    def on_all_done(self):
+        self.progress_bar.setVisible(False)
+        self.process_btn.setText("Start Processing")
+        self.process_btn.setEnabled(True)
+        self.status_label.setText("Processing complete!")
+        self.log("All files processed.")
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Video Pipelines")
+
+    # Set app icon
+    icon_path = Path(__file__).parent / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
+    window = VideoProcessorApp()
+    window.show()
+
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

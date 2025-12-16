@@ -10,6 +10,47 @@ from pathlib import Path
 name = "Compress Video"
 description = "Compress video by ~20x (downsizes resolution, lowers audio bitrate)"
 
+# Pipeline options - configurable settings shown in UI
+options = [
+    {
+        'key': 'audio_volume',
+        'label': 'Audio Volume',
+        'type': 'float',
+        'default': 1.0,
+        'min': 0.0,
+        'max': 10.0,
+        'step': 0.1,
+        'description': 'Audio volume multiplier (1.0 = no change)'
+    },
+    {
+        'key': 'width',
+        'label': 'Width',
+        'type': 'int',
+        'default': 960,
+        'min': 128,
+        'max': 7680,
+        'description': 'Target width in pixels'
+    },
+    {
+        'key': 'height',
+        'label': 'Height',
+        'type': 'int',
+        'default': 540,
+        'min': 128,
+        'max': 4320,
+        'description': 'Target height in pixels'
+    },
+    {
+        'key': 'audio_bitrate',
+        'label': 'Audio Bitrate (kbps)',
+        'type': 'int',
+        'default': 64,
+        'min': 32,
+        'max': 320,
+        'description': 'Audio bitrate in kbps'
+    },
+]
+
 
 def get_video_duration(input_path):
     """Get video duration in seconds using ffprobe."""
@@ -26,7 +67,7 @@ def get_video_duration(input_path):
         return None
 
 
-def process(input_path: str, output_dir: str, progress_callback=None) -> str:
+def process(input_path: str, output_dir: str, progress_callback=None, options=None) -> str:
     """
     Compress a video file by ~20x and convert to mp4.
 
@@ -34,6 +75,7 @@ def process(input_path: str, output_dir: str, progress_callback=None) -> str:
         input_path: Path to input video file
         output_dir: Directory to save output file
         progress_callback: Optional callback(percent, message) for progress updates
+        options: Optional dict of pipeline options
 
     Returns:
         Path to the compressed output file
@@ -44,25 +86,42 @@ def process(input_path: str, output_dir: str, progress_callback=None) -> str:
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
+    # Get options with defaults
+    opts = options or {}
+    audio_volume = opts.get('audio_volume', 1.0)
+    width = opts.get('width', 960)
+    height = opts.get('height', 540)
+    audio_bitrate = opts.get('audio_bitrate', 64)
+
     output_path = output_dir / f"{input_path.stem}_compressed.mp4"
 
     # Get duration for progress calculation
     duration = get_video_duration(input_path)
 
+    # Build video filter - scale to target dimensions preserving aspect ratio
+    vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+
     cmd = [
         "ffmpeg",
         "-y",
         "-i", str(input_path),
-        "-vf", "scale=iw/2:ih/2:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        "-vf", vf,
         "-c:v", "libx264",
         "-crf", "28",
         "-preset", "fast",
+    ]
+
+    # Add audio volume filter if not 1.0
+    if audio_volume != 1.0:
+        cmd.extend(["-af", f"volume={audio_volume}"])
+
+    cmd.extend([
         "-c:a", "aac",
-        "-b:a", "64k",
+        "-b:a", f"{audio_bitrate}k",
         "-ar", "22050",
         "-progress", "pipe:1",
         str(output_path)
-    ]
+    ])
 
     if progress_callback:
         progress_callback(0, f"Starting compression: {input_path.name}")

@@ -56,10 +56,24 @@ def check_installation() -> tuple[bool, str]:
         Tuple of (is_installed, message)
     """
     try:
-        import basic_pitch
-        return True, f"basic-pitch {getattr(basic_pitch, '__version__', 'installed')}"
-    except ImportError:
-        return False, "basic-pitch not installed"
+        # Use importlib.metadata to check package version without importing it
+        # (importing basic_pitch can fail due to TensorFlow initialization issues)
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            ver = version("basic-pitch")
+            return True, f"basic-pitch {ver}"
+        except PackageNotFoundError:
+            return False, "basic-pitch not installed"
+    except Exception as e:
+        # Fallback: try direct import
+        try:
+            import basic_pitch
+            return True, f"basic-pitch {getattr(basic_pitch, '__version__', 'installed')}"
+        except ImportError:
+            return False, "basic-pitch not installed"
+        except Exception:
+            # Package exists but has import issues (likely TF related)
+            return True, "basic-pitch installed (TF init pending)"
 
 
 def install_dependencies(progress_callback=None) -> tuple[bool, str]:

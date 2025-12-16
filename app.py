@@ -13,10 +13,16 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QProgressBar, QFileDialog, QMessageBox, QFrame, QTextEdit,
-    QDialog, QGroupBox, QSpinBox
+    QDialog, QGroupBox, QSpinBox, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon
+
+try:
+    import yt_dlp
+    YT_DLP_AVAILABLE = True
+except ImportError:
+    YT_DLP_AVAILABLE = False
 
 from pipelines import get_available_pipelines
 
@@ -110,6 +116,227 @@ class PipelineHelpDialog(QDialog):
         import subprocess
         pipelines_dir = Path(__file__).parent / "pipelines"
         subprocess.run(["open", str(pipelines_dir)])
+
+
+class DownloadThread(QThread):
+    """Background thread for downloading videos from URLs using yt-dlp."""
+    progress = pyqtSignal(int, str)  # percent, message
+    finished = pyqtSignal(str)  # downloaded file path
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, url, output_dir):
+        super().__init__()
+        self.url = url
+        self.output_dir = output_dir
+        self._stop_requested = False
+
+    def run(self):
+        if not YT_DLP_AVAILABLE:
+            self.error.emit("yt-dlp is not installed. Please install it with: pip install yt-dlp")
+            return
+
+        final_filepath = None
+
+        def progress_hook(d):
+            if self._stop_requested:
+                raise Exception("Download cancelled")
+
+            if d['status'] == 'downloading':
+                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                downloaded = d.get('downloaded_bytes', 0)
+                if total > 0:
+                    percent = int(downloaded * 100 / total)
+                    speed = d.get('speed', 0)
+                    speed_str = f"{speed / 1024 / 1024:.1f} MB/s" if speed else ""
+                    self.progress.emit(percent, f"Downloading... {percent}% {speed_str}")
+                else:
+                    self.progress.emit(0, "Downloading...")
+            elif d['status'] == 'finished':
+                self.progress.emit(95, "Processing...")
+
+        def postprocessor_hook(d):
+            nonlocal final_filepath
+            if d['status'] == 'finished':
+                # This is the final file after all postprocessing (merging, etc.)
+                final_filepath = d.get('info_dict', {}).get('filepath')
+                self.progress.emit(100, "Download complete!")
+
+        ydl_opts = {
+            'outtmpl': str(Path(self.output_dir) / '%(title)s.%(ext)s'),
+            'progress_hooks': [progress_hook],
+            'postprocessor_hooks': [postprocessor_hook],
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'merge_output_format': 'mp4',
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                self.progress.emit(0, "Extracting video info...")
+                info = ydl.extract_info(self.url, download=True)
+
+                # Use filepath from postprocessor hook (most reliable)
+                if final_filepath and Path(final_filepath).exists():
+                    self.finished.emit(final_filepath)
+                    return
+
+                # Fallback: use prepare_filename to get expected path
+                expected_path = ydl.prepare_filename(info)
+                if Path(expected_path).exists():
+                    self.finished.emit(expected_path)
+                    return
+
+                # Final fallback: check for common video extensions
+                base_path = Path(expected_path).with_suffix('')
+                for ext in ['.mp4', '.mkv', '.webm', '.mov']:
+                    check_path = base_path.with_suffix(ext)
+                    if check_path.exists():
+                        self.finished.emit(str(check_path))
+                        return
+
+                self.error.emit("Download completed but file not found")
+
+        except Exception as e:
+            if "cancelled" not in str(e).lower():
+                self.error.emit(str(e))
+
+    def stop(self):
+        self._stop_requested = True
+
+
+class URLDownloadDialog(QDialog):
+    """Dialog for downloading videos from URLs."""
+    download_complete = pyqtSignal(str)  # Emits the downloaded file path
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Download from URL")
+        self.setMinimumWidth(500)
+        self.download_thread = None
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # URL input
+        url_layout = QHBoxLayout()
+        url_layout.addWidget(QLabel("URL:"))
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("Paste video URL here (YouTube, Vimeo, etc.)")
+        self.url_input.textChanged.connect(self.on_url_changed)
+        url_layout.addWidget(self.url_input)
+        layout.addLayout(url_layout)
+
+        # Output directory selection
+        dir_layout = QHBoxLayout()
+        dir_layout.addWidget(QLabel("Save to:"))
+        self.dir_input = QLineEdit()
+        self.dir_input.setPlaceholderText("Select output directory")
+        default_dir = str(Path.home() / "Downloads")
+        self.dir_input.setText(default_dir)
+        dir_layout.addWidget(self.dir_input)
+        self.browse_dir_btn = QPushButton("Browse...")
+        self.browse_dir_btn.clicked.connect(self.browse_directory)
+        dir_layout.addWidget(self.browse_dir_btn)
+        layout.addLayout(dir_layout)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        # Status label
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #888;")
+        layout.addWidget(self.status_label)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.download_btn = QPushButton("Download")
+        self.download_btn.setEnabled(False)
+        self.download_btn.clicked.connect(self.start_download)
+        btn_layout.addWidget(self.download_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.cancel_or_close)
+        btn_layout.addWidget(self.cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def on_url_changed(self, text):
+        # Enable download button if URL looks valid
+        is_valid = text.startswith(('http://', 'https://')) and len(text) > 10
+        self.download_btn.setEnabled(is_valid)
+
+    def browse_directory(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory",
+            self.dir_input.text() or str(Path.home())
+        )
+        if directory:
+            self.dir_input.setText(directory)
+
+    def start_download(self):
+        url = self.url_input.text().strip()
+        output_dir = self.dir_input.text().strip()
+
+        if not url:
+            QMessageBox.warning(self, "Error", "Please enter a URL")
+            return
+
+        if not output_dir or not Path(output_dir).is_dir():
+            QMessageBox.warning(self, "Error", "Please select a valid output directory")
+            return
+
+        # Disable inputs during download
+        self.url_input.setEnabled(False)
+        self.dir_input.setEnabled(False)
+        self.browse_dir_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
+        self.download_btn.setText("Downloading...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+
+        # Start download thread
+        self.download_thread = DownloadThread(url, output_dir)
+        self.download_thread.progress.connect(self.on_progress)
+        self.download_thread.finished.connect(self.on_download_finished)
+        self.download_thread.error.connect(self.on_download_error)
+        self.download_thread.start()
+
+    def on_progress(self, percent, message):
+        self.progress_bar.setValue(percent)
+        self.status_label.setText(message)
+
+    def on_download_finished(self, file_path):
+        self.download_complete.emit(file_path)
+        self.status_label.setText(f"Downloaded: {Path(file_path).name}")
+        self.reset_ui()
+        self.accept()
+
+    def on_download_error(self, error):
+        QMessageBox.critical(self, "Download Error", str(error))
+        self.status_label.setText(f"Error: {error}")
+        self.reset_ui()
+
+    def reset_ui(self):
+        self.url_input.setEnabled(True)
+        self.dir_input.setEnabled(True)
+        self.browse_dir_btn.setEnabled(True)
+        self.download_btn.setEnabled(True)
+        self.download_btn.setText("Download")
+        self.progress_bar.setVisible(False)
+
+    def cancel_or_close(self):
+        if self.download_thread and self.download_thread.isRunning():
+            self.download_thread.stop()
+            self.download_thread.wait(2000)
+        self.reject()
+
+    def closeEvent(self, event):
+        self.cancel_or_close()
+        event.accept()
 
 
 def process_task(args):
@@ -373,10 +600,19 @@ class VideoProcessorApp(QMainWindow):
         self.drop_zone.files_dropped.connect(self.add_files)
         layout.addWidget(self.drop_zone)
 
-        # Browse button
+        # Browse and Download buttons
+        browse_layout = QHBoxLayout()
         browse_btn = QPushButton("Browse Files...")
         browse_btn.clicked.connect(self.browse_files)
-        layout.addWidget(browse_btn)
+        browse_layout.addWidget(browse_btn)
+
+        download_url_btn = QPushButton("Download from URL...")
+        download_url_btn.clicked.connect(self.download_from_url)
+        if not YT_DLP_AVAILABLE:
+            download_url_btn.setEnabled(False)
+            download_url_btn.setToolTip("yt-dlp not installed. Run: pip install yt-dlp")
+        browse_layout.addWidget(download_url_btn)
+        layout.addLayout(browse_layout)
 
         # File list
         layout.addWidget(QLabel("Files to process:"))
@@ -501,6 +737,17 @@ class VideoProcessorApp(QMainWindow):
         )
         if files:
             self.add_files(files)
+
+    def download_from_url(self):
+        """Open dialog to download video from URL."""
+        dialog = URLDownloadDialog(self)
+        dialog.download_complete.connect(self.on_download_complete)
+        dialog.exec()
+
+    def on_download_complete(self, file_path):
+        """Handle completed download by adding file to the list."""
+        self.add_files([file_path])
+        self.log(f"Downloaded: {Path(file_path).name}")
 
     def remove_selected(self):
         for item in self.file_list.selectedItems():

@@ -133,17 +133,20 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
     try:
         # Try uv first (preferred for this project), then fall back to pip
         # Use CoreML backend for Apple Silicon Macs (faster and more compatible)
-        # Also install setuptools for pkg_resources dependency
-        # Pin scipy<1.14 for compatibility (gaussian moved to scipy.signal.windows in 1.14)
+        # Pin exact versions for reproducibility and compatibility
         uv_path = shutil.which("uv")
-        packages = ["setuptools", "scipy<1.14", "basic-pitch[coreml]"]
+        packages = [
+            "setuptools>=70.0.0",
+            "scipy>=1.13.0,<1.14",  # 1.14+ removed scipy.signal.gaussian
+            "basic-pitch[coreml]==0.4.0",
+        ]
         if uv_path:
             # Use --reinstall to force downgrade scipy if needed
-            cmd = [uv_path, "pip", "install", "--reinstall", "--quiet"] + packages
+            cmd = [uv_path, "pip", "install", "--reinstall"] + packages
         else:
             # Fallback to pip
             import sys
-            cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall", "--quiet"] + packages
+            cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall"] + packages
 
         result = subprocess.run(
             cmd,
@@ -154,6 +157,10 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
 
         if result.returncode != 0:
             return False, f"Installation failed: {result.stderr}"
+
+        # Log warnings if any (even on success)
+        if result.stderr and progress_callback:
+            progress_callback(85, "Installation completed with warnings")
 
         if progress_callback:
             progress_callback(90, "Verifying installation...")

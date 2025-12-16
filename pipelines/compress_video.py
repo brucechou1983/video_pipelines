@@ -57,7 +57,6 @@ def process(input_path: str, output_dir: str, progress_callback=None) -> str:
         "-c:v", "libx264",
         "-crf", "28",
         "-preset", "fast",
-        "-af", "volume=10.0",
         "-c:a", "aac",
         "-b:a", "64k",
         "-ar", "22050",

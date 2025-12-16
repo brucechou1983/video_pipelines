@@ -6,12 +6,14 @@ Drag and drop videos to process with selected pipeline.
 
 import sys
 import os
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QProgressBar, QFileDialog, QMessageBox, QFrame, QTextEdit,
-    QDialog, QGroupBox
+    QDialog, QGroupBox, QSpinBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon
@@ -110,56 +112,137 @@ class PipelineHelpDialog(QDialog):
         subprocess.run(["open", str(pipelines_dir)])
 
 
+def process_task(args):
+    """
+    Worker function that runs in a separate process.
+    Must be module-level to be picklable.
+
+    Args:
+        args: Tuple of (file_path, output_dir, pipeline_key, pipeline_name, progress_queue, task_id)
+
+    Returns:
+        Tuple of (task_id, 'success', file_path, output_path, pipeline_name) or
+        (task_id, 'error', file_path, error_message, pipeline_name)
+    """
+    file_path, output_dir, pipeline_key, pipeline_name, progress_queue, task_id = args
+
+    try:
+        # Import pipeline dynamically in worker process
+        import importlib
+        module = importlib.import_module(f'pipelines.{pipeline_key}')
+        process_func = module.process
+
+        def progress_callback(percent, message):
+            # Send progress update to queue
+            progress_queue.put(('progress', task_id, percent, f"[{pipeline_name}] {message}"))
+
+        output_path = process_func(file_path, output_dir, progress_callback=progress_callback)
+        return (task_id, 'success', file_path, output_path, pipeline_name)
+    except Exception as e:
+        return (task_id, 'error', file_path, str(e), pipeline_name)
+
+
 class ProcessingThread(QThread):
-    """Background thread for video processing."""
+    """Background thread that coordinates multiprocess video processing."""
     progress = pyqtSignal(int, str)
     finished_file = pyqtSignal(str, str, str)  # input_path, output_path, pipeline_name
     error = pyqtSignal(str, str, str)  # input_path, error_message, pipeline_name
     all_done = pyqtSignal()
 
-    def __init__(self, files, pipelines):
+    def __init__(self, files, pipelines, worker_count=4):
         """
         Args:
             files: List of file paths to process
             pipelines: List of (key, name, process_func) tuples
+            worker_count: Number of parallel worker processes
         """
         super().__init__()
         self.files = files
         self.pipelines = pipelines
+        self.worker_count = worker_count
         self._stop_requested = False
+        self._executor = None
 
     def run(self):
-        total_tasks = len(self.files) * len(self.pipelines)
-        completed = 0
+        # Create manager for cross-process communication
+        manager = multiprocessing.Manager()
+        progress_queue = manager.Queue()
 
+        # Build task list: (file_path, output_dir, pipeline_key, pipeline_name, queue, task_id)
+        tasks = []
+        task_id = 0
         for file_path in self.files:
-            if self._stop_requested:
-                break
-            for key, name, process_func in self.pipelines:
-                if self._stop_requested:
-                    break
+            output_dir = str(Path(file_path).parent)
+            for key, name, _ in self.pipelines:  # process_func not used, imported in worker
+                tasks.append((file_path, output_dir, key, name, progress_queue, task_id))
+                task_id += 1
+
+        total_tasks = len(tasks)
+        if total_tasks == 0:
+            self.all_done.emit()
+            return
+
+        # Track per-task progress for overall calculation
+        task_progress = {i: 0 for i in range(total_tasks)}
+        completed_count = 0
+
+        self._executor = ProcessPoolExecutor(max_workers=self.worker_count)
+        try:
+            # Submit all tasks
+            futures = {self._executor.submit(process_task, task): task for task in tasks}
+
+            # Poll for progress and completion
+            while completed_count < total_tasks and not self._stop_requested:
+                # Check progress queue (non-blocking)
                 try:
-                    # Output to same directory as source file
-                    output_dir = str(Path(file_path).parent)
+                    while True:
+                        msg = progress_queue.get_nowait()
+                        if msg[0] == 'progress':
+                            _, tid, percent, message = msg
+                            task_progress[tid] = percent
+                            # Calculate overall progress
+                            overall = int(sum(task_progress.values()) / total_tasks)
+                            self.progress.emit(overall, message)
+                except:
+                    pass  # Queue empty
 
-                    def progress_callback(p, m):
-                        # Calculate overall progress
-                        overall = int((completed / total_tasks) * 100 + (p / total_tasks))
-                        self.progress.emit(overall, f"[{name}] {m}")
+                # Check for completed futures
+                for future in list(futures.keys()):
+                    if future.done():
+                        task = futures.pop(future)
+                        try:
+                            result = future.result()
+                            task_id, status, file_path, output_or_error, pipeline_name = result
+                            task_progress[task_id] = 100
 
-                    output = process_func(
-                        file_path,
-                        output_dir,
-                        progress_callback=progress_callback
-                    )
-                    self.finished_file.emit(file_path, output, name)
-                except Exception as e:
-                    self.error.emit(file_path, str(e), name)
-                completed += 1
+                            if status == 'success':
+                                self.finished_file.emit(file_path, output_or_error, pipeline_name)
+                            else:
+                                self.error.emit(file_path, output_or_error, pipeline_name)
+                        except Exception as e:
+                            # Worker process crashed
+                            file_path = task[0]
+                            pipeline_name = task[3]
+                            self.error.emit(file_path, str(e), pipeline_name)
+
+                        completed_count += 1
+                        # Update overall progress
+                        overall = int(sum(task_progress.values()) / total_tasks)
+                        self.progress.emit(overall, f"Completed {completed_count}/{total_tasks} tasks")
+
+                # Small sleep to avoid busy-waiting
+                self.msleep(50)
+
+        finally:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+            self._executor = None
+
         self.all_done.emit()
 
     def stop(self):
         self._stop_requested = True
+        if self._executor:
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 class DropZone(QFrame):
@@ -272,6 +355,18 @@ class VideoProcessorApp(QMainWindow):
             cb.setProperty("pipeline_key", key)
             self.pipeline_checkboxes[key] = cb
             layout.addWidget(cb)
+
+        # Settings section
+        settings_layout = QHBoxLayout()
+        settings_layout.addWidget(QLabel("Workers:"))
+        self.worker_count_spinbox = QSpinBox()
+        self.worker_count_spinbox.setRange(1, 16)
+        self.worker_count_spinbox.setValue(4)
+        self.worker_count_spinbox.setToolTip("Number of parallel processing workers")
+        self.worker_count_spinbox.setFixedWidth(60)
+        settings_layout.addWidget(self.worker_count_spinbox)
+        settings_layout.addStretch()
+        layout.addLayout(settings_layout)
 
         # Drop zone
         self.drop_zone = DropZone()
@@ -453,9 +548,11 @@ class VideoProcessorApp(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.process_btn.setText("Stop Processing")
-        self.log(f"Starting processing with: {pipeline_names}")
 
-        self.processing_thread = ProcessingThread(files, selected_pipelines)
+        worker_count = self.worker_count_spinbox.value()
+        self.log(f"Starting processing with {worker_count} workers: {pipeline_names}")
+
+        self.processing_thread = ProcessingThread(files, selected_pipelines, worker_count)
         self.processing_thread.progress.connect(self.on_progress)
         self.processing_thread.finished_file.connect(self.on_file_finished)
         self.processing_thread.error.connect(self.on_file_error)

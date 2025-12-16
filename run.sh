@@ -4,6 +4,13 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Check if uv is available
+if ! command -v uv &> /dev/null; then
+    echo "Error: uv is required but not installed."
+    echo "Install with: brew install uv"
+    exit 1
+fi
+
 # Check if ffmpeg is available
 if ! command -v ffmpeg &> /dev/null; then
     echo "Error: ffmpeg is required but not installed."
@@ -11,4 +18,6 @@ if ! command -v ffmpeg &> /dev/null; then
     exit 1
 fi
 
+# Sync dependencies and run app
+uv sync --quiet
 uv run python app.py

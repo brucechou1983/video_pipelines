@@ -5,7 +5,7 @@ macOS app for batch video processing with drag-and-drop support.
 ## Setup
 
 ```bash
-brew install ffmpeg
+brew install ffmpeg uv
 ./run.sh
 ```
 

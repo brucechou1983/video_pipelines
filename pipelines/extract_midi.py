@@ -96,11 +96,12 @@ def install_dependencies(progress_callback=None) -> tuple[bool, str]:
         uv_path = shutil.which("uv")
         packages = ["setuptools", "scipy<1.14", "basic-pitch[coreml]"]
         if uv_path:
-            cmd = [uv_path, "pip", "install", "--quiet"] + packages
+            # Use --reinstall to force downgrade scipy if needed
+            cmd = [uv_path, "pip", "install", "--reinstall", "--quiet"] + packages
         else:
             # Fallback to pip
             import sys
-            cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + packages
+            cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall", "--quiet"] + packages
 
         result = subprocess.run(
             cmd,

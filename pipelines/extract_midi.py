@@ -177,15 +177,15 @@ def process(input_path: str, output_dir: str, progress_callback=None, options=No
     # Import here to catch import errors at runtime
     try:
         from basic_pitch.inference import predict_and_save
-        # Try CoreML model first (preferred for Apple Silicon), fall back to TensorFlow
-        try:
-            from basic_pitch import ICASSP_2022_MODEL_PATH as MODEL_PATH
-        except ImportError:
-            # CoreML model path
-            from basic_pitch import ICASSP_2022_MODEL_PATH as MODEL_PATH
-    except ImportError:
+        from basic_pitch import ICASSP_2022_MODEL_PATH as MODEL_PATH
+    except ImportError as e:
         raise RuntimeError(
-            "basic-pitch is not installed. Please enable and install it from Settings (Cmd+,)"
+            f"basic-pitch is not installed. Please enable and install it from Settings (Cmd+,). Error: {e}"
+        )
+    except Exception as e:
+        # Catch other errors (e.g., TensorFlow/CoreML initialization issues)
+        raise RuntimeError(
+            f"Failed to initialize basic-pitch: {type(e).__name__}: {e}"
         )
 
     input_path = Path(input_path)

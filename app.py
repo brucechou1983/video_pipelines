@@ -135,7 +135,7 @@ class DownloadThread(QThread):
             self.error.emit("yt-dlp is not installed. Please install it with: pip install yt-dlp")
             return
 
-        downloaded_file = None
+        final_filepath = None
 
         def progress_hook(d):
             if self._stop_requested:
@@ -152,13 +152,19 @@ class DownloadThread(QThread):
                 else:
                     self.progress.emit(0, "Downloading...")
             elif d['status'] == 'finished':
-                nonlocal downloaded_file
-                downloaded_file = d.get('filename')
+                self.progress.emit(95, "Processing...")
+
+        def postprocessor_hook(d):
+            nonlocal final_filepath
+            if d['status'] == 'finished':
+                # This is the final file after all postprocessing (merging, etc.)
+                final_filepath = d.get('info_dict', {}).get('filepath')
                 self.progress.emit(100, "Download complete!")
 
         ydl_opts = {
             'outtmpl': str(Path(self.output_dir) / '%(title)s.%(ext)s'),
             'progress_hooks': [progress_hook],
+            'postprocessor_hooks': [postprocessor_hook],
             'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'merge_output_format': 'mp4',
             'quiet': True,
@@ -170,24 +176,26 @@ class DownloadThread(QThread):
                 self.progress.emit(0, "Extracting video info...")
                 info = ydl.extract_info(self.url, download=True)
 
-                # Get the final filename
-                if downloaded_file and Path(downloaded_file).exists():
-                    final_path = downloaded_file
-                else:
-                    # Construct expected path from info
-                    title = info.get('title', 'video')
-                    ext = info.get('ext', 'mp4')
-                    final_path = str(Path(self.output_dir) / f"{title}.{ext}")
+                # Use filepath from postprocessor hook (most reliable)
+                if final_filepath and Path(final_filepath).exists():
+                    self.finished.emit(final_filepath)
+                    return
 
-                if Path(final_path).exists():
-                    self.finished.emit(final_path)
-                else:
-                    # Try to find the downloaded file
-                    for f in Path(self.output_dir).iterdir():
-                        if f.is_file() and f.suffix.lower() in {'.mp4', '.mkv', '.webm', '.mov'}:
-                            self.finished.emit(str(f))
-                            return
-                    self.error.emit("Download completed but file not found")
+                # Fallback: use prepare_filename to get expected path
+                expected_path = ydl.prepare_filename(info)
+                if Path(expected_path).exists():
+                    self.finished.emit(expected_path)
+                    return
+
+                # Final fallback: check for common video extensions
+                base_path = Path(expected_path).with_suffix('')
+                for ext in ['.mp4', '.mkv', '.webm', '.mov']:
+                    check_path = base_path.with_suffix(ext)
+                    if check_path.exists():
+                        self.finished.emit(str(check_path))
+                        return
+
+                self.error.emit("Download completed but file not found")
 
         except Exception as e:
             if "cancelled" not in str(e).lower():
@@ -206,7 +214,6 @@ class URLDownloadDialog(QDialog):
         self.setWindowTitle("Download from URL")
         self.setMinimumWidth(500)
         self.download_thread = None
-        self.temp_dir = None
 
         self.setup_ui()
 

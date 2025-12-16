@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QProgressBar, QFileDialog, QMessageBox, QFrame, QTextEdit,
-    QDialog, QGroupBox, QSpinBox, QLineEdit
+    QDialog, QGroupBox, QSpinBox, QLineEdit, QDoubleSpinBox, QFormLayout
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon
@@ -339,23 +339,122 @@ class URLDownloadDialog(QDialog):
         event.accept()
 
 
+class PipelineOptionsDialog(QDialog):
+    """Dialog for configuring pipeline options."""
+
+    def __init__(self, pipeline_name, options_config, current_values=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Configure {pipeline_name}")
+        self.setMinimumWidth(350)
+        self.options_config = options_config
+        self.widgets = {}
+        self.result_values = current_values.copy() if current_values else {}
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Form layout for options
+        form = QFormLayout()
+
+        for opt in self.options_config:
+            key = opt['key']
+            label = opt['label']
+            opt_type = opt['type']
+            default = opt['default']
+            current = self.result_values.get(key, default)
+
+            if opt_type == 'float':
+                widget = QDoubleSpinBox()
+                widget.setRange(opt.get('min', 0), opt.get('max', 100))
+                widget.setSingleStep(opt.get('step', 0.1))
+                widget.setDecimals(2)
+                widget.setValue(float(current))
+            elif opt_type == 'int':
+                widget = QSpinBox()
+                widget.setRange(opt.get('min', 0), opt.get('max', 10000))
+                widget.setValue(int(current))
+            else:
+                widget = QLineEdit()
+                widget.setText(str(current))
+
+            if 'description' in opt:
+                widget.setToolTip(opt['description'])
+
+            self.widgets[key] = widget
+            form.addRow(f"{label}:", widget)
+
+        layout.addLayout(form)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.clicked.connect(self.reset_defaults)
+        btn_layout.addWidget(reset_btn)
+
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept_values)
+        ok_btn.setDefault(True)
+        btn_layout.addWidget(ok_btn)
+
+        layout.addLayout(btn_layout)
+
+    def reset_defaults(self):
+        for opt in self.options_config:
+            key = opt['key']
+            default = opt['default']
+            widget = self.widgets[key]
+
+            if isinstance(widget, QDoubleSpinBox):
+                widget.setValue(float(default))
+            elif isinstance(widget, QSpinBox):
+                widget.setValue(int(default))
+            else:
+                widget.setText(str(default))
+
+    def accept_values(self):
+        for opt in self.options_config:
+            key = opt['key']
+            widget = self.widgets[key]
+
+            if isinstance(widget, QDoubleSpinBox):
+                self.result_values[key] = widget.value()
+            elif isinstance(widget, QSpinBox):
+                self.result_values[key] = widget.value()
+            else:
+                self.result_values[key] = widget.text()
+
+        self.accept()
+
+    def get_values(self):
+        return self.result_values
+
+
 def process_task(args):
     """
     Worker function that runs in a separate process.
     Must be module-level to be picklable.
 
     Args:
-        args: Tuple of (file_path, output_dir, pipeline_key, pipeline_name, progress_queue, task_id)
+        args: Tuple of (file_path, output_dir, pipeline_key, pipeline_name, progress_queue, task_id, options)
 
     Returns:
         Tuple of (task_id, 'success', file_path, output_path, pipeline_name) or
         (task_id, 'error', file_path, error_message, pipeline_name)
     """
-    file_path, output_dir, pipeline_key, pipeline_name, progress_queue, task_id = args
+    file_path, output_dir, pipeline_key, pipeline_name, progress_queue, task_id, options = args
 
     try:
         # Import pipeline dynamically in worker process
         import importlib
+        import inspect
         module = importlib.import_module(f'pipelines.{pipeline_key}')
         process_func = module.process
 
@@ -363,7 +462,12 @@ def process_task(args):
             # Send progress update to queue
             progress_queue.put(('progress', task_id, percent, f"[{pipeline_name}] {message}"))
 
-        output_path = process_func(file_path, output_dir, progress_callback=progress_callback)
+        # Check if process function accepts options parameter
+        sig = inspect.signature(process_func)
+        if 'options' in sig.parameters:
+            output_path = process_func(file_path, output_dir, progress_callback=progress_callback, options=options)
+        else:
+            output_path = process_func(file_path, output_dir, progress_callback=progress_callback)
         return (task_id, 'success', file_path, output_path, pipeline_name)
     except Exception as e:
         return (task_id, 'error', file_path, str(e), pipeline_name)
@@ -376,17 +480,19 @@ class ProcessingThread(QThread):
     error = pyqtSignal(str, str, str)  # input_path, error_message, pipeline_name
     all_done = pyqtSignal()
 
-    def __init__(self, files, pipelines, worker_count=4):
+    def __init__(self, files, pipelines, worker_count=4, pipeline_options=None):
         """
         Args:
             files: List of file paths to process
             pipelines: List of (key, name, process_func) tuples
             worker_count: Number of parallel worker processes
+            pipeline_options: Dict mapping pipeline_key to options dict
         """
         super().__init__()
         self.files = files
         self.pipelines = pipelines
         self.worker_count = worker_count
+        self.pipeline_options = pipeline_options or {}
         self._stop_requested = False
         self._executor = None
 
@@ -395,13 +501,14 @@ class ProcessingThread(QThread):
         manager = multiprocessing.Manager()
         progress_queue = manager.Queue()
 
-        # Build task list: (file_path, output_dir, pipeline_key, pipeline_name, queue, task_id)
+        # Build task list: (file_path, output_dir, pipeline_key, pipeline_name, queue, task_id, options)
         tasks = []
         task_id = 0
         for file_path in self.files:
             output_dir = str(Path(file_path).parent)
             for key, name, _ in self.pipelines:  # process_func not used, imported in worker
-                tasks.append((file_path, output_dir, key, name, progress_queue, task_id))
+                options = self.pipeline_options.get(key, {})
+                tasks.append((file_path, output_dir, key, name, progress_queue, task_id, options))
                 task_id += 1
 
         total_tasks = len(tasks)
@@ -555,6 +662,9 @@ class VideoProcessorApp(QMainWindow):
         # Load pipelines
         self.pipelines = get_available_pipelines()
 
+        # Store pipeline options (key -> options dict)
+        self.pipeline_options = {}
+
         self.setup_ui()
         self.apply_dark_theme()
 
@@ -574,14 +684,27 @@ class VideoProcessorApp(QMainWindow):
         pipeline_header.addWidget(help_btn)
         layout.addLayout(pipeline_header)
 
-        # Pipeline checkboxes
+        # Pipeline checkboxes with configure buttons
         self.pipeline_checkboxes = {}
         for key, pipeline in self.pipelines.items():
+            row = QHBoxLayout()
             cb = QCheckBox(f"{pipeline['name']} - {pipeline['description']}")
             cb.setChecked(True)  # Default to checked
             cb.setProperty("pipeline_key", key)
             self.pipeline_checkboxes[key] = cb
-            layout.addWidget(cb)
+            row.addWidget(cb)
+
+            # Add configure button if pipeline has options
+            if pipeline.get('options'):
+                config_btn = QPushButton("Configure")
+                config_btn.setFixedWidth(80)
+                config_btn.setProperty("pipeline_key", key)
+                config_btn.clicked.connect(lambda checked, k=key: self.configure_pipeline(k))
+                row.addWidget(config_btn)
+            else:
+                row.addStretch()
+
+            layout.addLayout(row)
 
         # Settings section
         settings_layout = QHBoxLayout()
@@ -715,6 +838,24 @@ class VideoProcessorApp(QMainWindow):
         dialog = PipelineHelpDialog(self)
         dialog.exec()
 
+    def configure_pipeline(self, pipeline_key):
+        """Show options dialog for a pipeline."""
+        pipeline = self.pipelines.get(pipeline_key)
+        if not pipeline or not pipeline.get('options'):
+            return
+
+        current_values = self.pipeline_options.get(pipeline_key, {})
+        dialog = PipelineOptionsDialog(
+            pipeline['name'],
+            pipeline['options'],
+            current_values,
+            self
+        )
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.pipeline_options[pipeline_key] = dialog.get_values()
+            self.log(f"Updated {pipeline['name']} settings")
+
     def add_files(self, files):
         for f in files:
             if not self.file_exists_in_list(f):
@@ -799,7 +940,7 @@ class VideoProcessorApp(QMainWindow):
         worker_count = self.worker_count_spinbox.value()
         self.log(f"Starting processing with {worker_count} workers: {pipeline_names}")
 
-        self.processing_thread = ProcessingThread(files, selected_pipelines, worker_count)
+        self.processing_thread = ProcessingThread(files, selected_pipelines, worker_count, self.pipeline_options)
         self.processing_thread.progress.connect(self.on_progress)
         self.processing_thread.finished_file.connect(self.on_file_finished)
         self.processing_thread.error.connect(self.on_file_error)

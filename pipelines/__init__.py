@@ -24,7 +24,8 @@ def get_available_pipelines():
                 pipelines[module_name] = {
                     'name': module.name,
                     'description': getattr(module, 'description', ''),
-                    'process': module.process
+                    'process': module.process,
+                    'options': getattr(module, 'options', None)
                 }
         except Exception as e:
             print(f"Failed to load pipeline {module_name}: {e}")

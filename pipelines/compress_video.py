@@ -23,22 +23,14 @@ options = [
         'description': 'Audio volume multiplier (1.0 = no change)'
     },
     {
-        'key': 'width',
-        'label': 'Width',
-        'type': 'int',
-        'default': 960,
-        'min': 128,
-        'max': 7680,
-        'description': 'Target width in pixels'
-    },
-    {
-        'key': 'height',
-        'label': 'Height',
-        'type': 'int',
-        'default': 540,
-        'min': 128,
-        'max': 4320,
-        'description': 'Target height in pixels'
+        'key': 'scale_ratio',
+        'label': 'Scale Ratio',
+        'type': 'float',
+        'default': 0.5,
+        'min': 0.1,
+        'max': 1.0,
+        'step': 0.1,
+        'description': 'Scale factor for dimensions (0.5 = half size)'
     },
     {
         'key': 'audio_bitrate',
@@ -89,8 +81,7 @@ def process(input_path: str, output_dir: str, progress_callback=None, options=No
     # Get options with defaults
     opts = options or {}
     audio_volume = opts.get('audio_volume', 1.0)
-    width = opts.get('width', 960)
-    height = opts.get('height', 540)
+    scale_ratio = opts.get('scale_ratio', 0.5)
     audio_bitrate = opts.get('audio_bitrate', 64)
 
     output_path = output_dir / f"{input_path.stem}_compressed.mp4"
@@ -98,8 +89,8 @@ def process(input_path: str, output_dir: str, progress_callback=None, options=No
     # Get duration for progress calculation
     duration = get_video_duration(input_path)
 
-    # Build video filter - scale to target dimensions preserving aspect ratio
-    vf = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    # Build video filter - scale by ratio preserving aspect ratio, ensure even dimensions
+    vf = f"scale=iw*{scale_ratio}:ih*{scale_ratio},pad=ceil(iw/2)*2:ceil(ih/2)*2"
 
     cmd = [
         "ffmpeg",

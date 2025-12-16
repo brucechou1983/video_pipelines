@@ -13,10 +13,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QCheckBox, QPushButton, QListWidget, QListWidgetItem,
     QProgressBar, QFileDialog, QMessageBox, QFrame, QTextEdit,
-    QDialog, QGroupBox, QSpinBox, QLineEdit, QDoubleSpinBox, QFormLayout
+    QDialog, QGroupBox, QSpinBox, QLineEdit, QDoubleSpinBox, QFormLayout,
+    QComboBox, QTabWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMimeData
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QShortcut, QKeySequence
 
 try:
     import yt_dlp
@@ -25,6 +26,7 @@ except ImportError:
     YT_DLP_AVAILABLE = False
 
 from pipelines import get_available_pipelines
+import settings as app_settings
 
 PIPELINE_HELP = """
 To create a new pipeline, add a Python file in the 'pipelines' folder.
@@ -119,15 +121,20 @@ class PipelineHelpDialog(QDialog):
 
 
 class DownloadThread(QThread):
-    """Background thread for downloading videos from URLs using yt-dlp."""
+    """Background thread for downloading videos/audio from URLs using yt-dlp."""
     progress = pyqtSignal(int, str)  # percent, message
     finished = pyqtSignal(str)  # downloaded file path
     error = pyqtSignal(str)  # error message
 
-    def __init__(self, url, output_dir):
+    # Download format types
+    FORMAT_VIDEO = 'video'
+    FORMAT_AUDIO = 'audio'
+
+    def __init__(self, url, output_dir, format_type='video'):
         super().__init__()
         self.url = url
         self.output_dir = output_dir
+        self.format_type = format_type
         self._stop_requested = False
 
     def run(self):
@@ -161,19 +168,36 @@ class DownloadThread(QThread):
                 final_filepath = d.get('info_dict', {}).get('filepath')
                 self.progress.emit(100, "Download complete!")
 
+        # Base options
         ydl_opts = {
             'outtmpl': str(Path(self.output_dir) / '%(title)s.%(ext)s'),
             'progress_hooks': [progress_hook],
             'postprocessor_hooks': [postprocessor_hook],
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'merge_output_format': 'mp4',
             'quiet': True,
             'no_warnings': True,
         }
 
+        # Format-specific options
+        if self.format_type == self.FORMAT_AUDIO:
+            ydl_opts.update({
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+            })
+            file_extensions = ['.mp3', '.m4a', '.wav', '.opus', '.ogg']
+        else:
+            ydl_opts.update({
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'merge_output_format': 'mp4',
+            })
+            file_extensions = ['.mp4', '.mkv', '.webm', '.mov']
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                self.progress.emit(0, "Extracting video info...")
+                self.progress.emit(0, f"Extracting {'audio' if self.format_type == self.FORMAT_AUDIO else 'video'} info...")
                 info = ydl.extract_info(self.url, download=True)
 
                 # Use filepath from postprocessor hook (most reliable)
@@ -187,9 +211,9 @@ class DownloadThread(QThread):
                     self.finished.emit(expected_path)
                     return
 
-                # Final fallback: check for common video extensions
+                # Final fallback: check for common extensions
                 base_path = Path(expected_path).with_suffix('')
-                for ext in ['.mp4', '.mkv', '.webm', '.mov']:
+                for ext in file_extensions:
                     check_path = base_path.with_suffix(ext)
                     if check_path.exists():
                         self.finished.emit(str(check_path))
@@ -206,7 +230,7 @@ class DownloadThread(QThread):
 
 
 class URLDownloadDialog(QDialog):
-    """Dialog for downloading videos from URLs."""
+    """Dialog for downloading videos/audio from URLs."""
     download_complete = pyqtSignal(str)  # Emits the downloaded file path
 
     def __init__(self, parent=None):
@@ -228,6 +252,17 @@ class URLDownloadDialog(QDialog):
         self.url_input.textChanged.connect(self.on_url_changed)
         url_layout.addWidget(self.url_input)
         layout.addLayout(url_layout)
+
+        # Format selection (Video/Audio)
+        format_layout = QHBoxLayout()
+        format_layout.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("Video (MP4)", DownloadThread.FORMAT_VIDEO)
+        self.format_combo.addItem("Audio Only (MP3)", DownloadThread.FORMAT_AUDIO)
+        self.format_combo.setToolTip("Select whether to download video or audio only")
+        format_layout.addWidget(self.format_combo)
+        format_layout.addStretch()
+        layout.addLayout(format_layout)
 
         # Output directory selection
         dir_layout = QHBoxLayout()
@@ -280,6 +315,7 @@ class URLDownloadDialog(QDialog):
     def start_download(self):
         url = self.url_input.text().strip()
         output_dir = self.dir_input.text().strip()
+        format_type = self.format_combo.currentData()
 
         if not url:
             QMessageBox.warning(self, "Error", "Please enter a URL")
@@ -293,13 +329,14 @@ class URLDownloadDialog(QDialog):
         self.url_input.setEnabled(False)
         self.dir_input.setEnabled(False)
         self.browse_dir_btn.setEnabled(False)
+        self.format_combo.setEnabled(False)
         self.download_btn.setEnabled(False)
         self.download_btn.setText("Downloading...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
 
         # Start download thread
-        self.download_thread = DownloadThread(url, output_dir)
+        self.download_thread = DownloadThread(url, output_dir, format_type)
         self.download_thread.progress.connect(self.on_progress)
         self.download_thread.finished.connect(self.on_download_finished)
         self.download_thread.error.connect(self.on_download_error)
@@ -324,6 +361,7 @@ class URLDownloadDialog(QDialog):
         self.url_input.setEnabled(True)
         self.dir_input.setEnabled(True)
         self.browse_dir_btn.setEnabled(True)
+        self.format_combo.setEnabled(True)
         self.download_btn.setEnabled(True)
         self.download_btn.setText("Download")
         self.progress_bar.setVisible(False)
@@ -435,6 +473,203 @@ class PipelineOptionsDialog(QDialog):
 
     def get_values(self):
         return self.result_values
+
+
+class InstallThread(QThread):
+    """Background thread for installing pipeline dependencies."""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(bool, str)  # success, message
+
+    def __init__(self, pipeline_key):
+        super().__init__()
+        self.pipeline_key = pipeline_key
+
+    def run(self):
+        try:
+            if self.pipeline_key == 'extract_midi':
+                from pipelines import extract_midi
+                success, message = extract_midi.install_dependencies(
+                    progress_callback=lambda p, m: self.progress.emit(p, m)
+                )
+                self.finished.emit(success, message)
+            else:
+                self.finished.emit(False, f"Unknown pipeline: {self.pipeline_key}")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class SettingsDialog(QDialog):
+    """Application settings dialog."""
+
+    pipeline_changed = pyqtSignal()  # Emitted when pipeline availability changes
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumSize(500, 400)
+        self.install_thread = None
+
+        self.setup_ui()
+        self.load_current_settings()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Tab widget for different settings categories
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+
+        # Optional Pipelines Tab
+        pipelines_tab = QWidget()
+        pipelines_layout = QVBoxLayout(pipelines_tab)
+
+        # MIDI Extraction Pipeline
+        midi_group = QGroupBox("MIDI Extraction Pipeline")
+        midi_layout = QVBoxLayout(midi_group)
+
+        midi_desc = QLabel(
+            "Extract piano MIDI from audio/video files using Spotify's basic-pitch AI model.\n"
+            "This pipeline requires downloading additional dependencies (~500MB)."
+        )
+        midi_desc.setWordWrap(True)
+        midi_desc.setStyleSheet("color: #aaa;")
+        midi_layout.addWidget(midi_desc)
+
+        # Enable checkbox
+        self.midi_enabled_cb = QCheckBox("Enable MIDI Extraction Pipeline")
+        self.midi_enabled_cb.stateChanged.connect(self.on_midi_enabled_changed)
+        midi_layout.addWidget(self.midi_enabled_cb)
+
+        # Installation status and button
+        install_layout = QHBoxLayout()
+
+        self.midi_status_label = QLabel("Status: Not installed")
+        self.midi_status_label.setStyleSheet("color: #888;")
+        install_layout.addWidget(self.midi_status_label)
+
+        install_layout.addStretch()
+
+        self.midi_install_btn = QPushButton("Install Dependencies")
+        self.midi_install_btn.clicked.connect(self.install_midi_dependencies)
+        install_layout.addWidget(self.midi_install_btn)
+
+        midi_layout.addLayout(install_layout)
+
+        # Progress bar for installation
+        self.midi_progress = QProgressBar()
+        self.midi_progress.setVisible(False)
+        midi_layout.addWidget(self.midi_progress)
+
+        self.midi_progress_label = QLabel("")
+        self.midi_progress_label.setStyleSheet("color: #888;")
+        self.midi_progress_label.setVisible(False)
+        midi_layout.addWidget(self.midi_progress_label)
+
+        pipelines_layout.addWidget(midi_group)
+        pipelines_layout.addStretch()
+
+        tabs.addTab(pipelines_tab, "Optional Pipelines")
+
+        # Close button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+
+    def load_current_settings(self):
+        """Load current settings and update UI."""
+        # Check if basic-pitch is installed
+        try:
+            from pipelines import extract_midi
+            is_installed, status_msg = extract_midi.check_installation()
+        except Exception:
+            is_installed = False
+            status_msg = "Not installed"
+
+        # Update installation status in settings
+        app_settings.set_optional_pipeline_installed('extract_midi', is_installed)
+
+        # Load enabled state
+        is_enabled = app_settings.is_optional_pipeline_enabled('extract_midi')
+        self.midi_enabled_cb.setChecked(is_enabled)
+
+        # Update UI
+        self.update_midi_status(is_installed, status_msg)
+
+    def update_midi_status(self, is_installed, message):
+        """Update MIDI pipeline status display."""
+        if is_installed:
+            self.midi_status_label.setText(f"Status: {message}")
+            self.midi_status_label.setStyleSheet("color: #4a9eff;")
+            self.midi_install_btn.setText("Reinstall")
+            self.midi_install_btn.setEnabled(True)
+            self.midi_enabled_cb.setEnabled(True)
+        else:
+            self.midi_status_label.setText(f"Status: {message}")
+            self.midi_status_label.setStyleSheet("color: #ff6b6b;")
+            self.midi_install_btn.setText("Install Dependencies")
+            self.midi_install_btn.setEnabled(True)
+            # Can't enable without installation
+            if self.midi_enabled_cb.isChecked():
+                self.midi_enabled_cb.setChecked(False)
+            self.midi_enabled_cb.setEnabled(False)
+
+    def on_midi_enabled_changed(self, state):
+        """Handle MIDI pipeline enable/disable."""
+        is_enabled = state == Qt.CheckState.Checked.value
+        app_settings.set_optional_pipeline_enabled('extract_midi', is_enabled)
+        self.pipeline_changed.emit()
+
+    def install_midi_dependencies(self):
+        """Start installation of MIDI pipeline dependencies."""
+        self.midi_install_btn.setEnabled(False)
+        self.midi_progress.setVisible(True)
+        self.midi_progress.setValue(0)
+        self.midi_progress_label.setVisible(True)
+        self.midi_progress_label.setText("Starting installation...")
+
+        self.install_thread = InstallThread('extract_midi')
+        self.install_thread.progress.connect(self.on_install_progress)
+        self.install_thread.finished.connect(self.on_install_finished)
+        self.install_thread.start()
+
+    def on_install_progress(self, percent, message):
+        """Handle installation progress updates."""
+        self.midi_progress.setValue(percent)
+        self.midi_progress_label.setText(message)
+
+    def on_install_finished(self, success, message):
+        """Handle installation completion."""
+        self.midi_progress.setVisible(False)
+        self.midi_progress_label.setVisible(False)
+
+        if success:
+            app_settings.set_optional_pipeline_installed('extract_midi', True)
+            self.update_midi_status(True, "Installed successfully")
+            self.midi_enabled_cb.setEnabled(True)
+            self.midi_enabled_cb.setChecked(True)
+            QMessageBox.information(self, "Success", "MIDI extraction dependencies installed successfully!")
+        else:
+            self.update_midi_status(False, f"Installation failed: {message}")
+            QMessageBox.critical(self, "Installation Failed", f"Failed to install dependencies:\n{message}")
+
+        self.midi_install_btn.setEnabled(True)
+        self.pipeline_changed.emit()
+
+    def closeEvent(self, event):
+        """Handle dialog close."""
+        if self.install_thread and self.install_thread.isRunning():
+            reply = QMessageBox.question(
+                self, "Installation in Progress",
+                "Installation is still in progress. Are you sure you want to close?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                event.ignore()
+                return
+        event.accept()
 
 
 def process_task(args):
@@ -580,10 +815,12 @@ class ProcessingThread(QThread):
 
 
 class DropZone(QFrame):
-    """Drag and drop zone for video files."""
+    """Drag and drop zone for video and audio files."""
     files_dropped = pyqtSignal(list)
 
     VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
+    AUDIO_EXTENSIONS = {'.mp3', '.wav', '.flac', '.aac', '.m4a', '.ogg', '.wma', '.opus'}
+    SUPPORTED_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 
     def __init__(self):
         super().__init__()
@@ -602,7 +839,7 @@ class DropZone(QFrame):
         """)
 
         layout = QVBoxLayout(self)
-        label = QLabel("Drop Video Files Here")
+        label = QLabel("Drop Video/Audio Files Here")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setStyleSheet("color: #888; font-size: 18px;")
         layout.addWidget(label)
@@ -644,7 +881,7 @@ class DropZone(QFrame):
         files = []
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if Path(path).suffix.lower() in self.VIDEO_EXTENSIONS:
+            if Path(path).suffix.lower() in self.SUPPORTED_EXTENSIONS:
                 files.append(path)
 
         if files:
@@ -659,14 +896,18 @@ class VideoProcessorApp(QMainWindow):
         self.setMinimumSize(600, 500)
         self.processing_thread = None
 
-        # Load pipelines
+        # Load pipelines (only enabled ones)
         self.pipelines = get_available_pipelines()
 
         # Store pipeline options (key -> options dict)
         self.pipeline_options = {}
 
+        # Container for pipeline checkbox widgets (for dynamic refresh)
+        self.pipeline_rows = []
+
         self.setup_ui()
         self.apply_dark_theme()
+        self.setup_shortcuts()
 
     def setup_ui(self):
         central = QWidget()
@@ -682,29 +923,22 @@ class VideoProcessorApp(QMainWindow):
         help_btn = QPushButton("Read Me")
         help_btn.clicked.connect(self.show_pipeline_help)
         pipeline_header.addWidget(help_btn)
+        settings_btn = QPushButton("Settings")
+        settings_btn.clicked.connect(self.open_settings)
+        settings_btn.setToolTip("Open settings (Cmd+,)")
+        pipeline_header.addWidget(settings_btn)
         layout.addLayout(pipeline_header)
 
-        # Pipeline checkboxes with configure buttons
+        # Pipeline checkboxes container (can be refreshed)
+        self.pipelines_container = QWidget()
+        self.pipelines_layout = QVBoxLayout(self.pipelines_container)
+        self.pipelines_layout.setContentsMargins(0, 0, 0, 0)
+        self.pipelines_layout.setSpacing(5)
+        layout.addWidget(self.pipelines_container)
+
+        # Populate pipeline checkboxes
         self.pipeline_checkboxes = {}
-        for key, pipeline in self.pipelines.items():
-            row = QHBoxLayout()
-            cb = QCheckBox(f"{pipeline['name']} - {pipeline['description']}")
-            cb.setChecked(True)  # Default to checked
-            cb.setProperty("pipeline_key", key)
-            self.pipeline_checkboxes[key] = cb
-            row.addWidget(cb)
-
-            # Add configure button if pipeline has options
-            if pipeline.get('options'):
-                config_btn = QPushButton("Configure")
-                config_btn.setFixedWidth(80)
-                config_btn.setProperty("pipeline_key", key)
-                config_btn.clicked.connect(lambda checked, k=key: self.configure_pipeline(k))
-                row.addWidget(config_btn)
-            else:
-                row.addStretch()
-
-            layout.addLayout(row)
+        self.refresh_pipeline_checkboxes()
 
         # Settings section
         settings_layout = QHBoxLayout()
@@ -834,6 +1068,74 @@ class VideoProcessorApp(QMainWindow):
             }
         """)
 
+    def setup_shortcuts(self):
+        """Setup keyboard shortcuts."""
+        # Cmd+, for Settings (standard macOS shortcut)
+        settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        settings_shortcut.activated.connect(self.open_settings)
+
+    def open_settings(self):
+        """Open the settings dialog."""
+        dialog = SettingsDialog(self)
+        dialog.pipeline_changed.connect(self.on_pipeline_changed)
+        dialog.exec()
+
+    def on_pipeline_changed(self):
+        """Handle pipeline availability changes from settings."""
+        # Reload pipelines
+        self.pipelines = get_available_pipelines()
+        # Refresh checkboxes
+        self.refresh_pipeline_checkboxes()
+        self.log("Pipeline list updated")
+
+    def refresh_pipeline_checkboxes(self):
+        """Refresh the pipeline checkboxes based on current pipelines."""
+        # Clear existing checkboxes
+        while self.pipelines_layout.count():
+            item = self.pipelines_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                # Clear nested layout
+                while item.layout().count():
+                    sub_item = item.layout().takeAt(0)
+                    if sub_item.widget():
+                        sub_item.widget().deleteLater()
+
+        # Clear checkboxes dict
+        self.pipeline_checkboxes = {}
+
+        # Check if no pipelines
+        if not self.pipelines:
+            no_pipelines_label = QLabel("No pipelines available. Enable optional pipelines in Settings.")
+            no_pipelines_label.setStyleSheet("color: #888; font-style: italic;")
+            self.pipelines_layout.addWidget(no_pipelines_label)
+            return
+
+        # Create checkboxes for each pipeline
+        for key, pipeline in self.pipelines.items():
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+
+            cb = QCheckBox(f"{pipeline['name']} - {pipeline['description']}")
+            cb.setChecked(True)  # Default to checked
+            cb.setProperty("pipeline_key", key)
+            self.pipeline_checkboxes[key] = cb
+            row.addWidget(cb)
+
+            # Add configure button if pipeline has options
+            if pipeline.get('options'):
+                config_btn = QPushButton("Configure")
+                config_btn.setFixedWidth(80)
+                config_btn.setProperty("pipeline_key", key)
+                config_btn.clicked.connect(lambda checked, k=key: self.configure_pipeline(k))
+                row.addWidget(config_btn)
+            else:
+                row.addStretch()
+
+            self.pipelines_layout.addWidget(row_widget)
+
     def show_pipeline_help(self):
         dialog = PipelineHelpDialog(self)
         dialog.exec()
@@ -873,8 +1175,10 @@ class VideoProcessorApp(QMainWindow):
 
     def browse_files(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select Videos", "",
-            "Video Files (*.mp4 *.mov *.avi *.mkv *.wmv *.flv *.webm *.m4v *.mpeg *.mpg)"
+            self, "Select Media Files", "",
+            "Media Files (*.mp4 *.mov *.avi *.mkv *.wmv *.flv *.webm *.m4v *.mpeg *.mpg *.mp3 *.wav *.flac *.aac *.m4a *.ogg *.wma *.opus);;"
+            "Video Files (*.mp4 *.mov *.avi *.mkv *.wmv *.flv *.webm *.m4v *.mpeg *.mpg);;"
+            "Audio Files (*.mp3 *.wav *.flac *.aac *.m4a *.ogg *.wma *.opus)"
         )
         if files:
             self.add_files(files)

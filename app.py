@@ -646,17 +646,47 @@ class SettingsDialog(QDialog):
         self.midi_progress_label.setVisible(False)
 
         if success:
+            # Invalidate import caches so Python can find newly installed packages
+            import importlib
+            importlib.invalidate_caches()
+
             app_settings.set_optional_pipeline_installed('extract_midi', True)
             self.update_midi_status(True, "Installed successfully")
             self.midi_enabled_cb.setEnabled(True)
             self.midi_enabled_cb.setChecked(True)
-            QMessageBox.information(self, "Success", "MIDI extraction dependencies installed successfully!")
+
+            # Ask user if they want to restart the app
+            reply = QMessageBox.question(
+                self, "Installation Complete",
+                "MIDI extraction dependencies installed successfully!\n\n"
+                "The app needs to restart for the changes to take effect.\n\n"
+                "Restart now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._restart_application()
         else:
             self.update_midi_status(False, f"Installation failed: {message}")
             QMessageBox.critical(self, "Installation Failed", f"Failed to install dependencies:\n{message}")
 
         self.midi_install_btn.setEnabled(True)
         self.pipeline_changed.emit()
+
+    def _restart_application(self):
+        """Restart the application to apply changes."""
+        import subprocess
+        # Get the command used to start this app
+        python_exe = sys.executable
+        script_path = os.path.abspath(sys.argv[0])
+
+        # Close the settings dialog first
+        self.accept()
+
+        # Schedule application quit and restart
+        QApplication.instance().quit()
+
+        # Start new instance - use subprocess to launch after this process exits
+        subprocess.Popen([python_exe, script_path])
 
     def closeEvent(self, event):
         """Handle dialog close."""

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Video Processor - macOS Desktop App
+Media Pipeline - macOS Desktop App
 Drag and drop videos to process with selected pipeline.
 """
 
@@ -987,7 +987,7 @@ class DropZone(QFrame):
 class VideoProcessorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Video Pipelines")
+        self.setWindowTitle("Media Pipelines")
         self.setMinimumSize(600, 500)
         self.processing_thread = None
 
@@ -1367,7 +1367,7 @@ class VideoProcessorApp(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Video Pipelines")
+    app.setApplicationName("Media Pipelines")
 
     # Set app icon
     icon_path = Path(__file__).parent / "icon.png"

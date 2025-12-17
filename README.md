@@ -1,4 +1,4 @@
-# Video Pipelines for Mac
+# Media Pipelines for Mac
 
 A free, open-source macOS application for batch video compression and audio-to-MIDI conversion. Simple drag-and-drop interface with no watermarks or file size limits.
 
